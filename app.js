@@ -61,6 +61,10 @@
   const LOCAL_NEWS_KEYWORDS_URL = "http://127.0.0.1:4180/api/news-keywords";
   const LOCAL_NEWS_ARTICLES_URL = "http://127.0.0.1:4180/api/news-articles";
   const LOCAL_NEWS_COLLECT_URL = "http://127.0.0.1:4180/api/news-collect";
+  const DEPLOYED_API_BASE =
+    window.location.hostname === "qjtjt1827.github.io"
+      ? "https://chosun-university-media-2026.aejinh.chatgpt.site"
+      : "";
   const OFFICIAL_RELEASE_LABEL = "보도자료 자동 수집";
   const OFFICIAL_SYNC_INTERVAL_MS = 10 * 60 * 1000;
   const MEDIA_MOVE_SYNC_INTERVAL_MS = 30 * 60 * 1000;
@@ -3534,6 +3538,11 @@
     return Date.now() - last.getTime() > MEDIA_MOVE_SYNC_INTERVAL_MS;
   }
 
+  function platformApiUrl(path) {
+    const normalizedPath = String(path || "").replace(/^\.?\//, "");
+    return DEPLOYED_API_BASE ? `${DEPLOYED_API_BASE}/${normalizedPath}` : `./${normalizedPath}`;
+  }
+
   async function fetchMediaMoveItems() {
     const collected = [];
     let lastError = null;
@@ -3545,7 +3554,7 @@
         scope: "external",
       });
       const apiUrls = [];
-      if (window.location.protocol !== "file:") apiUrls.push(`./api/news-monitor?${params.toString()}`);
+      if (window.location.protocol !== "file:") apiUrls.push(platformApiUrl(`api/news-monitor?${params.toString()}`));
       apiUrls.push(`${LOCAL_NEWS_MONITOR_URL}?${params.toString()}`);
 
       let loaded = false;
@@ -4074,7 +4083,7 @@
         scope: "external",
       });
       const apiUrls = [];
-      if (window.location.protocol !== "file:") apiUrls.push(`./api/news-monitor?${params.toString()}`);
+      if (window.location.protocol !== "file:") apiUrls.push(platformApiUrl(`api/news-monitor?${params.toString()}`));
       apiUrls.push(`${LOCAL_NEWS_MONITOR_URL}?${params.toString()}`);
 
       let loaded = false;
@@ -4203,9 +4212,9 @@
     }[kind];
     if (window.location.protocol === "file:") return local;
     return {
-      collect: "./api/news-collect",
-      articles: "./api/news-articles",
-      keywords: "./api/news-keywords",
+      collect: platformApiUrl("api/news-collect"),
+      articles: platformApiUrl("api/news-articles"),
+      keywords: platformApiUrl("api/news-keywords"),
     }[kind] || local;
   }
 
@@ -4314,7 +4323,7 @@
         date: ARTICLE_COLLECTION_START_DATE,
       });
       const apiUrls = [];
-      if (window.location.protocol !== "file:") apiUrls.push(`./api/news-monitor?${params.toString()}`);
+      if (window.location.protocol !== "file:") apiUrls.push(platformApiUrl(`api/news-monitor?${params.toString()}`));
       apiUrls.push(`${LOCAL_NEWS_MONITOR_URL}?${params.toString()}`);
 
       let loaded = false;
@@ -4560,7 +4569,7 @@
 
   async function fetchOfficialReleaseItems() {
     const apiUrls = [
-      `./api/official-releases?url=${encodeURIComponent(OFFICIAL_RELEASE_URL)}&start=${encodeURIComponent(ACTUAL_USE_START_DATE)}`,
+      platformApiUrl(`api/official-releases?url=${encodeURIComponent(OFFICIAL_RELEASE_URL)}&start=${encodeURIComponent(ACTUAL_USE_START_DATE)}`),
       `${LOCAL_COLLECTOR_URL}?url=${encodeURIComponent(OFFICIAL_RELEASE_URL)}&start=${encodeURIComponent(ACTUAL_USE_START_DATE)}`,
     ];
     let invalidSourceMessage = "";
