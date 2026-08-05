@@ -3996,7 +3996,6 @@
     state.meta.articleScanStatus = "checking";
     state.meta.articleScanMessage = `${ARTICLE_COLLECTION_START_DATE} 이후 중복되지 않은 기사와 외부 동향을 수집하는 중입니다.`;
     renderView();
-    await collectNewsNow({ fromMonitoring: true });
     await refreshArticleMonitoring({ silent: true });
     await refreshExternalMonitoring({ silent: true });
   }
@@ -4303,12 +4302,15 @@
       state.articles = dedupeArticles(filterArticleItems(state.articles));
       state.affiliatedArticles = dedupeArticles(filterArticleItems(state.affiliatedArticles));
       state.meta.aiScanAt = new Date().toISOString();
-      state.meta.articleScanStatus = "blocked";
-      state.meta.articleScanMessage = articleScanErrorMessage(error);
-      addActivity("기사 새로고침", "수집 서버 연결 실패");
+      const savedCount = state.articles.length + state.affiliatedArticles.length;
+      state.meta.articleScanStatus = savedCount ? "success" : "blocked";
+      state.meta.articleScanMessage = savedCount
+        ? `최신 수집 서버 응답이 지연되어 저장된 기사 ${savedCount}건을 표시합니다. 잠시 후 다시 새로고침해 주세요.`
+        : articleScanErrorMessage(error);
+      addActivity("기사 새로고침", savedCount ? `수집 지연 · 저장 기사 ${savedCount}건 유지` : "수집 서버 연결 실패");
       saveState();
       if (!silent || ui.view === "dashboard" || ui.view === "monitoring" || ui.view === "releases") renderView();
-      if (!silent) toast("기사 새로고침을 완료하지 못했습니다.");
+      if (!silent) toast(savedCount ? "저장된 기사로 화면을 유지했습니다." : "기사 새로고침을 완료하지 못했습니다.");
       return { added: 0, updated: 0, total: 0, error };
     }
   }
@@ -4356,15 +4358,16 @@
   }
 
   function newsMonitorQueries() {
-    const queries = ['"조선대학교" OR "조선대"', "조선대", "조선대학교"];
+    const queries = ['"조선대학교" OR "조선대"'];
     state.releases
       .filter((release) => isOperationalDate(release.publishAt || release.createdAt))
       .sort(sortByReleaseDate)
-      .slice(0, 40)
+      .slice(0, 4)
       .forEach((release) => {
-        releaseNewsSearchQueries(release).forEach((query) => queries.push(query));
+        const query = releaseNewsSearchQuery(release);
+        if (query) queries.push(query);
       });
-    return [...new Set(queries.map(normalizeWhitespace).filter(Boolean))].slice(0, 120);
+    return [...new Set(queries.map(normalizeWhitespace).filter(Boolean))].slice(0, 5);
   }
 
   function releaseNewsSearchQueries(release) {
