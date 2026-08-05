@@ -3996,7 +3996,6 @@
     state.meta.articleScanStatus = "checking";
     state.meta.articleScanMessage = `${ARTICLE_COLLECTION_START_DATE} 이후 중복되지 않은 기사와 외부 동향을 수집하는 중입니다.`;
     renderView();
-    await refreshOfficialReleases({ silent: true });
     await collectNewsNow({ fromMonitoring: true });
     await refreshArticleMonitoring({ silent: true });
     await refreshExternalMonitoring({ silent: true });
@@ -4401,7 +4400,10 @@
     if (/뉴스 검색 응답 실패|응답 오류/.test(message)) {
       return `수집 서버는 연결됐지만 외부 뉴스 검색이 실패했습니다. ${message}`;
     }
-    return "2026-07-09 이후 기사 수집을 위해 자동 수집 서버가 필요합니다. start-platform.cmd로 실행한 뒤 다시 새로고침하세요.";
+    if (DEPLOYED_API_BASE) {
+      return "기사 수집 서버에 일시적으로 연결하지 못했습니다. 잠시 후 다시 시도해 주세요. 기존 저장 자료는 유지됩니다.";
+    }
+    return "기사 수집을 위해 자동 수집 서버가 필요합니다. start-platform.cmd로 실행한 뒤 다시 새로고침하세요.";
   }
 
   function articleFromNewsPayload(item) {
@@ -5939,7 +5941,7 @@
   function dateFilterState(scope) {
     const fromKey = `${scope}DateFrom`;
     const toKey = `${scope}DateTo`;
-    const from = normalizeDateInput(filterValue(fromKey, ACTUAL_USE_START_DATE)) || ACTUAL_USE_START_DATE;
+    const from = normalizeDateInput(filterValue(fromKey, firstDayOfMonth())) || firstDayOfMonth();
     const to = normalizeDateInput(filterValue(toKey, todayDate())) || todayDate();
     ui.filters[fromKey] = from;
     ui.filters[toKey] = to;
