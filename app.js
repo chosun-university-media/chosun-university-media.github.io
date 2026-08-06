@@ -51,7 +51,8 @@
     unknown: { label: "미분류", tone: "neutral" },
   };
 
-  const MATCH_THRESHOLD = 32;
+  const MATCH_THRESHOLD = 56;
+  const MATCHING_RULE_VERSION = "20260806-strict-release-v1";
   const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
   const OFFICIAL_RELEASE_SOURCE_VERSION = "20260714-official-pagination-v7";
   const OFFICIAL_BASELINE_RELEASE_VERSION = "20260714-july9-official-v4";
@@ -207,11 +208,13 @@
       input.meta?.actualUseStartDate === ACTUAL_USE_START_DATE &&
       input.meta?.operationalResetVersion === OPERATIONAL_RESET_VERSION
     ) {
-      return ensureOfficialBaselineState(prepareMediaMoveSourceState(prepareOfficialReleaseSourceState(prepareArticleCollectionState(scopeOperationalState(input)))));
+      return prepareMatchingRuleState(
+        ensureOfficialBaselineState(prepareMediaMoveSourceState(prepareOfficialReleaseSourceState(prepareArticleCollectionState(scopeOperationalState(input)))))
+      );
     }
 
     const now = new Date().toISOString();
-    return ensureOfficialBaselineState({
+    return prepareMatchingRuleState(ensureOfficialBaselineState({
       ...input,
       releases: [],
       articles: [],
@@ -247,7 +250,7 @@
         homepageScanMessage: `${ACTUAL_USE_START_DATE}부터 실제 운영 데이터를 수집합니다. 자동 수집 서버 실행 후 새로고침하세요.`,
         homepageScanCount: 0,
       },
-    });
+    }));
   }
 
   function scopeOperationalState(input) {
@@ -296,6 +299,49 @@
         articleStartDate: ARTICLE_COLLECTION_START_DATE,
         aiScanAt: "",
         updatedAt: now,
+      },
+    };
+  }
+
+  function prepareMatchingRuleState(input) {
+    if (input.meta?.matchingRuleVersion === MATCHING_RULE_VERSION) return input;
+    const releases = Array.isArray(input.releases) ? input.releases : [];
+    const rematched = dedupeArticles([
+      ...(Array.isArray(input.articles) ? input.articles : []),
+      ...(Array.isArray(input.affiliatedArticles) ? input.affiliatedArticles : []),
+    ].map((article) => ({
+      ...article,
+      releaseId: "",
+      matchScore: 0,
+      matchBasis: "",
+    }))).map((article) => {
+      const normalized = normalizeArticle({
+        ...article,
+        releaseId: "",
+        matchScore: 0,
+        matchBasis: "",
+      }, []);
+      autoMatchArticle(normalized, releases, true);
+      normalized.attentionReason = articleAttentionReason(normalized);
+      return normalized;
+    });
+    return {
+      ...input,
+      articles: filterArticleItems(rematched.filter((article) => !isAffiliatedOnlyArticle(article))),
+      affiliatedArticles: filterArticleItems(rematched.filter((article) => isAffiliatedOnlyArticle(article))),
+      activity: [
+        {
+          id: uid("act"),
+          at: new Date().toISOString(),
+          actor: "기사 성과 연결",
+          message: "핵심어와 기관 구분을 기준으로 보도자료 기사 연결을 다시 계산했습니다.",
+        },
+        ...(Array.isArray(input.activity) ? input.activity : []),
+      ].slice(0, 80),
+      meta: {
+        ...(input.meta || {}),
+        matchingRuleVersion: MATCHING_RULE_VERSION,
+        updatedAt: new Date().toISOString(),
       },
     };
   }
@@ -3892,30 +3938,39 @@
     return item;
   }
 
-  function articleOrganizationText(article, releases = []) {
+  function articleOrganizationText(article) {
     const excerpt = normalizeWhitespace(article?.excerpt || "");
     const meaningfulExcerpt = /관련 기사입니다|키워드\s*["']?.+["']?\s*로 수집|뉴스 모니터링 새로고침|뉴스 수집기로 저장/.test(excerpt) ? "" : excerpt;
-    const release = releases.find((item) => item.id === article?.releaseId);
     return normalizeWhitespace([
       article?.title,
       meaningfulExcerpt,
       article?.summary,
       article?.body,
       article?.description,
-      release?.title,
-      release?.summary,
-      release?.body,
+      ...(Array.isArray(article?.keywords) ? article.keywords : []),
     ].filter(Boolean).join(" "));
   }
 
-  function isAffiliatedOnlyArticle(article, releases = []) {
-    const text = articleOrganizationText(article, releases);
-    const hospitalPattern = /조선대학교(?:치과|한방)?\s*병원|조선대(?:치과|한방)?\s*병원/i;
+  function isAffiliatedOnlyArticle(article) {
+    return isHospitalOnlyText(articleOrganizationText(article));
+  }
+
+  function isAffiliatedOnlyRelease(release) {
+    return isHospitalOnlyText(normalizeWhitespace([
+      release?.title,
+      release?.subtitle,
+      release?.summary,
+      release?.body,
+      ...(Array.isArray(release?.tags) ? release.tags : []),
+    ].filter(Boolean).join(" ")));
+  }
+
+  function isHospitalOnlyText(value) {
+    const text = normalizeWhitespace(value);
+    const hospitalPattern = /조선(?:대학교|대)\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원/i;
     if (!hospitalPattern.test(text)) return false;
-    const withoutHospitalName = text
-      .replace(/조선대학교(?:치과|한방)?\s*병원/gi, " ")
-      .replace(/조선대(?:치과|한방)?\s*병원/gi, " ");
-    return !/조선대학교|조선대/i.test(withoutHospitalName);
+    const withoutHospitalName = text.replace(/조선(?:대학교|대)\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원/gi, " ");
+    return !/(?:조선대학교|조선대)(?!\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원)/i.test(withoutHospitalName);
   }
 
   function resolvePortalArticleOutlets(articles) {
@@ -4359,15 +4414,23 @@
 
   function newsMonitorQueries() {
     const queries = ['"조선대학교" OR "조선대"'];
-    state.releases
+    const releases = state.releases
       .filter((release) => isOperationalDate(release.publishAt || release.createdAt))
-      .sort(sortByReleaseDate)
-      .slice(0, 4)
-      .forEach((release) => {
-        const query = releaseNewsSearchQuery(release);
-        if (query) queries.push(query);
+      .sort((left, right) => {
+        const coverageDiff = releaseArticleStats(left).articleCount - releaseArticleStats(right).articleCount;
+        return coverageDiff || sortByReleaseDate(left, right);
       });
-    return [...new Set(queries.map(normalizeWhitespace).filter(Boolean))].slice(0, 5);
+    if (!releases.length) return queries;
+
+    const batchSize = Math.min(8, releases.length);
+    const cursor = Math.max(0, Number(state.meta.releaseSearchCursor || 0)) % releases.length;
+    for (let offset = 0; offset < batchSize; offset += 1) {
+      const release = releases[(cursor + offset) % releases.length];
+      const query = releaseNewsSearchQuery(release);
+      if (query) queries.push(query);
+    }
+    state.meta.releaseSearchCursor = (cursor + batchSize) % releases.length;
+    return [...new Set(queries.map(normalizeWhitespace).filter(Boolean))];
   }
 
   function releaseNewsSearchQueries(release) {
@@ -4965,13 +5028,24 @@
   function runAutoMatch(shouldRender = true) {
     let matched = 0;
     let changed = 0;
-    state.articles.forEach((article) => {
+    const rematched = dedupeArticles([
+      ...(Array.isArray(state.articles) ? state.articles : []),
+      ...(Array.isArray(state.affiliatedArticles) ? state.affiliatedArticles : []),
+    ].map((article) => ({
+      ...article,
+      releaseId: "",
+      matchScore: 0,
+      matchBasis: "",
+    }))).map((article) => ({ ...article }));
+    rematched.forEach((article) => {
       const before = article.releaseId || "";
       const result = autoMatchArticle(article, state.releases, true);
       if (result?.releaseId) matched += 1;
       if ((article.releaseId || "") !== before) changed += 1;
       article.attentionReason = articleAttentionReason(article);
     });
+    state.articles = filterArticleItems(rematched.filter((article) => !isAffiliatedOnlyArticle(article)));
+    state.affiliatedArticles = filterArticleItems(rematched.filter((article) => isAffiliatedOnlyArticle(article)));
     if (!shouldRender) return;
     addActivity("자동 매칭", `기사 ${matched}건 매칭, ${changed}건 연결 변경`);
     saveState();
@@ -5073,6 +5147,11 @@
   }
 
   function autoMatchArticle(article, releases = state.releases, force = false) {
+    if (force) {
+      article.releaseId = "";
+      article.matchScore = 0;
+      article.matchBasis = "";
+    }
     const best = findBestReleaseMatch(article, releases);
     if (!best) return null;
     if (best.score >= MATCH_THRESHOLD && (force || !article.releaseId || best.score >= Number(article.matchScore || 0))) {
@@ -5095,6 +5174,13 @@
   }
 
   function matchArticleToRelease(article, release) {
+    if (isAffiliatedOnlyArticle(article) !== isAffiliatedOnlyRelease(release)) {
+      return { score: 0, basis: "기관 구분 불일치" };
+    }
+    const dateDistance = releaseArticleDateDistance(article, release);
+    if (dateDistance !== null && (dateDistance < -3 || dateDistance > 90)) {
+      return { score: 0, basis: `보도 시점 불일치 (${dateDistance}일)` };
+    }
     const articleText = `${article.title || ""} ${article.excerpt || ""} ${(article.keywords || []).join(" ")}`;
     const releaseCore = `${release.title || ""} ${release.subtitle || ""}`;
     const releaseText = `${releaseCore} ${release.body || ""} ${(release.tags || []).join(" ")}`;
@@ -5102,12 +5188,54 @@
     const contentOverlap = tokenOverlap(articleText, releaseText);
     const keywordHits = intersectionCount(extractKeywords(releaseText, 14), tokenizeForMatch(articleText));
     const coreHits = intersectionCount(releaseCoreTokens(release), tokenizeForMatch(articleText));
+    const distinctiveTokens = releaseDistinctiveTokens(release);
+    const articleTitleTokens = tokenizeForMatch(article.title || "");
+    const titleAnchorHits = intersectionCount(distinctiveTokens, articleTitleTokens);
+    const normalizedArticleTitle = normalizeArticleComparableText(article.title || "").replace(/\s+/g, "");
+    const normalizedReleaseTitle = normalizeArticleComparableText(release.title || "").replace(/\s+/g, "");
+    const directTitleMatch = Boolean(
+      normalizedArticleTitle &&
+      normalizedReleaseTitle &&
+      (normalizedArticleTitle.includes(normalizedReleaseTitle) || normalizedReleaseTitle.includes(normalizedArticleTitle))
+    );
+    const phraseScore = articlePhraseSimilarity(article.title || "", release.title || "");
+    const strongAnchor = directTitleMatch || phraseScore >= 0.6 || titleAnchorHits >= 2 || (distinctiveTokens.length === 1 && titleAnchorHits === 1 && distinctiveTokens[0].length >= 4);
     const dateBonus = releaseDateBonus(article, release);
     const exactTitleScore = exactReleaseTitleScore(article, release, dateBonus);
-    const weightedScore = Math.round(titleOverlap * 48 + contentOverlap * 32 + Math.min(16, keywordHits * 4) + Math.min(18, coreHits * 6) + dateBonus);
-    const score = clamp(Math.max(weightedScore, exactTitleScore), 0, 100);
-    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 핵심어 ${keywordHits + coreHits}개`;
+    const weightedScore = Math.round(titleOverlap * 52 + contentOverlap * 18 + Math.min(12, keywordHits * 3) + Math.min(18, coreHits * 5) + Math.min(12, titleAnchorHits * 6) + dateBonus);
+    const rawScore = Math.max(weightedScore, exactTitleScore);
+    const score = clamp(strongAnchor ? rawScore : Math.min(rawScore, MATCH_THRESHOLD - 1), 0, 100);
+    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 고유 핵심어 ${titleAnchorHits}개`;
     return { score, basis };
+  }
+
+  function releaseDistinctiveTokens(release) {
+    const generic = new Set([
+      ...articleGroupStopwords(),
+      "성과",
+      "사업",
+      "프로그램",
+      "교육",
+      "지원",
+      "운영",
+      "결과",
+      "발표",
+      "참여",
+      "협력",
+      "진행",
+    ]);
+    return tokenizeForMatch(`${release?.title || ""} ${(release?.tags || []).join(" ")}`)
+      .filter((token) => !generic.has(token))
+      .filter((token) => !/^20\d{2}년?$/.test(token))
+      .filter((token) => token.length >= 2)
+      .slice(0, 12);
+  }
+
+  function releaseArticleDateDistance(article, release) {
+    const articleDate = parseDate(article?.publishedAt || article?.createdAt);
+    const releaseDate = parseDate(release?.publishAt || release?.createdAt);
+    if (!articleDate || !releaseDate) return null;
+    return Math.round((articleDate - releaseDate) / 86400000);
   }
 
   function exactReleaseTitleScore(article, release, dateBonus = 0) {
