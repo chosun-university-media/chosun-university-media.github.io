@@ -1,6 +1,7 @@
 (() => {
   const SUPABASE_URL = "https://ozucabnjnnvjezpeffdt.supabase.co";
   const SUPABASE_KEY = "sb_publishable_SAR-hOBRuo8F2EzeN0uPLA_OLmk3_Sw";
+  const ACCOUNT_EMAIL_DOMAIN = "account.chosunmedia.kr";
   const APP_SCRIPT_VERSION = "20260805-monitoring-date-v2";
   const authRoot = document.querySelector("#auth-root");
   const authModalRoot = document.querySelector("#auth-modal-root");
@@ -56,7 +57,7 @@
 
     const { data, error } = await client
       .from("profiles")
-      .select("id,email,name,department,role,status,created_at,approved_at")
+      .select("id,username,name,department,role,status,created_at,approved_at")
       .eq("id", currentSession.user.id)
       .maybeSingle();
 
@@ -111,7 +112,7 @@
               <label>이름<input name="name" type="text" autocomplete="name" required /></label>
               <label>소속 부서<input name="department" type="text" autocomplete="organization-title" required /></label>
             ` : ""}
-            <label>이메일<input name="email" type="email" autocomplete="email" required /></label>
+            <label>아이디<input name="username" type="text" autocomplete="username" minlength="4" maxlength="24" pattern="[A-Za-z0-9._-]+" required /></label>
             <label>비밀번호<input name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" minlength="8" required /></label>
             ${signup ? `<label>비밀번호 확인<input name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" required /></label>` : ""}
             <button class="auth-primary" type="submit">${signup ? "가입 신청" : "로그인"}</button>
@@ -133,9 +134,9 @@
           <h1>${rejected ? "이용 승인이 보류되었습니다" : "관리자 승인 대기 중입니다"}</h1>
           <p>${rejected ? "관리자에게 계정 상태를 문의해 주세요." : "가입 신청이 접수되었습니다. 관리자가 승인하면 모든 기능을 이용할 수 있습니다."}</p>
           <dl class="profile-summary">
-            <div><dt>신청자</dt><dd>${escapeHtml(currentProfile?.name || currentSession.user.email)}</dd></div>
+            <div><dt>신청자</dt><dd>${escapeHtml(currentProfile?.name || currentProfile?.username)}</dd></div>
             <div><dt>소속</dt><dd>${escapeHtml(currentProfile?.department || "-")}</dd></div>
-            <div><dt>이메일</dt><dd>${escapeHtml(currentSession.user.email || "-")}</dd></div>
+            <div><dt>아이디</dt><dd>${escapeHtml(currentProfile?.username || "-")}</dd></div>
           </dl>
           <div class="status-actions">
             <button class="auth-primary secondary" type="button" data-auth-action="refresh-status">승인 상태 확인</button>
@@ -189,14 +190,24 @@
   }
 
   async function login(values) {
+    const username = normalizeUsername(values.username);
+    if (!isValidUsername(username)) {
+      renderLogin("login", "아이디는 영문, 숫자, 마침표, 밑줄, 하이픈으로 입력해 주세요.");
+      return;
+    }
     const { error } = await client.auth.signInWithPassword({
-      email: String(values.email || "").trim().toLowerCase(),
+      email: usernameToEmail(username),
       password: String(values.password || ""),
     });
-    if (error) renderLogin("login", "이메일 또는 비밀번호를 확인해 주세요.");
+    if (error) renderLogin("login", "아이디 또는 비밀번호를 확인해 주세요.");
   }
 
   async function signup(values) {
+    const username = normalizeUsername(values.username);
+    if (!isValidUsername(username)) {
+      renderLogin("signup", "아이디는 4~24자의 영문, 숫자, 마침표, 밑줄, 하이픈으로 입력해 주세요.");
+      return;
+    }
     if (String(values.password || "").length < 8) {
       renderLogin("signup", "비밀번호는 8자 이상이어야 합니다.");
       return;
@@ -207,10 +218,11 @@
     }
 
     const { data, error } = await client.auth.signUp({
-      email: String(values.email || "").trim().toLowerCase(),
+      email: usernameToEmail(username),
       password: String(values.password || ""),
       options: {
         data: {
+          username,
           name: String(values.name || "").trim(),
           department: String(values.department || "").trim(),
         },
@@ -218,11 +230,11 @@
     });
 
     if (error) {
-      renderLogin("signup", "가입 신청을 처리하지 못했습니다. 이미 가입된 이메일인지 확인해 주세요.");
+      renderLogin("signup", "가입 신청을 처리하지 못했습니다. 이미 사용 중인 아이디인지 확인해 주세요.");
       return;
     }
     if (!data.session) {
-      renderLogin("login", "확인 이메일을 보냈습니다. 이메일 인증 후 로그인해 주세요.", "success");
+      renderLogin("login", "가입 신청이 완료되었습니다. 아이디로 로그인해 주세요.", "success");
     }
   }
 
@@ -243,7 +255,7 @@
     const menu = document.createElement("div");
     menu.className = "site-account-menu";
     menu.innerHTML = `
-      <span>${escapeHtml(currentProfile.name || currentProfile.email)}</span>
+      <span>${escapeHtml(currentProfile.name || currentProfile.username)}</span>
       ${currentProfile.role === "admin" ? `<button type="button" data-site-account="members">회원 관리</button>` : ""}
       <button type="button" data-site-account="logout">로그아웃</button>`;
     menu.addEventListener("click", async (event) => {
@@ -259,7 +271,7 @@
     authModalRoot.innerHTML = `<div class="auth-admin-modal"><div class="member-dialog"><p class="member-loading">회원 목록을 불러오는 중입니다.</p></div></div>`;
     const { data, error } = await client
       .from("profiles")
-      .select("id,email,name,department,role,status,created_at")
+      .select("id,username,name,department,role,status,created_at")
       .order("created_at", { ascending: false });
     if (error) {
       authModalRoot.querySelector(".member-dialog").innerHTML = `<p class="auth-message error">회원 목록을 불러오지 못했습니다.</p><button class="member-close-text" type="button" data-member-action="close">닫기</button>`;
@@ -294,7 +306,7 @@
     const joined = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium" }).format(new Date(member.created_at));
     return `
       <tr>
-        <td><strong>${escapeHtml(member.name || "이름 미입력")}</strong><span>${escapeHtml(member.email)}</span></td>
+        <td><strong>${escapeHtml(member.name || "이름 미입력")}</strong><span>${escapeHtml(member.username)}</span></td>
         <td>${escapeHtml(member.department || "-")}</td>
         <td>${escapeHtml(joined)}</td>
         <td>${member.role === "admin" ? "관리자" : "일반 회원"}</td>
@@ -350,6 +362,18 @@
     form.querySelectorAll("input,button").forEach((control) => {
       control.disabled = busy;
     });
+  }
+
+  function normalizeUsername(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function isValidUsername(username) {
+    return /^[a-z0-9._-]{4,24}$/.test(username);
+  }
+
+  function usernameToEmail(username) {
+    return `${username}@${ACCOUNT_EMAIL_DOMAIN}`;
   }
 
   function escapeHtml(value) {
