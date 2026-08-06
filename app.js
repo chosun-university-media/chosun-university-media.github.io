@@ -52,7 +52,7 @@
   };
 
   const MATCH_THRESHOLD = 56;
-  const MATCHING_RULE_VERSION = "20260806-strict-release-v1";
+  const MATCHING_RULE_VERSION = "20260806-strict-release-v2";
   const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
   const OFFICIAL_RELEASE_SOURCE_VERSION = "20260714-official-pagination-v7";
   const OFFICIAL_BASELINE_RELEASE_VERSION = "20260714-july9-official-v4";
@@ -5191,6 +5191,11 @@
     const distinctiveTokens = releaseDistinctiveTokens(release);
     const articleTitleTokens = tokenizeForMatch(article.title || "");
     const titleAnchorHits = intersectionCount(distinctiveTokens, articleTitleTokens);
+    const evidenceHits = intersectionCount(releaseEvidenceTokens(release), articleTitleTokens);
+    const semanticHits = intersectionCount(
+      articleSemanticConcepts(`${releaseCore} ${release.summary || ""} ${release.body || ""}`),
+      articleSemanticConcepts(article.title || "")
+    );
     const normalizedArticleTitle = normalizeArticleComparableText(article.title || "").replace(/\s+/g, "");
     const normalizedReleaseTitle = normalizeArticleComparableText(release.title || "").replace(/\s+/g, "");
     const directTitleMatch = Boolean(
@@ -5199,13 +5204,28 @@
       (normalizedArticleTitle.includes(normalizedReleaseTitle) || normalizedReleaseTitle.includes(normalizedArticleTitle))
     );
     const phraseScore = articlePhraseSimilarity(article.title || "", release.title || "");
-    const strongAnchor = directTitleMatch || phraseScore >= 0.6 || titleAnchorHits >= 2 || (distinctiveTokens.length === 1 && titleAnchorHits === 1 && distinctiveTokens[0].length >= 4);
+    const strongAnchor =
+      directTitleMatch ||
+      phraseScore >= 0.6 ||
+      titleAnchorHits >= 2 ||
+      (titleAnchorHits >= 1 && evidenceHits >= 3) ||
+      (titleAnchorHits >= 1 && semanticHits >= 1 && contentOverlap >= 0.16) ||
+      (distinctiveTokens.length === 1 && titleAnchorHits === 1 && distinctiveTokens[0].length >= 4);
     const dateBonus = releaseDateBonus(article, release);
     const exactTitleScore = exactReleaseTitleScore(article, release, dateBonus);
-    const weightedScore = Math.round(titleOverlap * 52 + contentOverlap * 18 + Math.min(12, keywordHits * 3) + Math.min(18, coreHits * 5) + Math.min(12, titleAnchorHits * 6) + dateBonus);
+    const weightedScore = Math.round(
+      titleOverlap * 52 +
+      contentOverlap * 18 +
+      Math.min(12, keywordHits * 3) +
+      Math.min(18, coreHits * 5) +
+      Math.min(12, titleAnchorHits * 6) +
+      Math.min(15, evidenceHits * 3) +
+      Math.min(8, semanticHits * 8) +
+      dateBonus
+    );
     const rawScore = Math.max(weightedScore, exactTitleScore);
     const score = clamp(strongAnchor ? rawScore : Math.min(rawScore, MATCH_THRESHOLD - 1), 0, 100);
-    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 고유 핵심어 ${titleAnchorHits}개`;
+    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 고유 핵심어 ${titleAnchorHits}개, 내용 근거 ${evidenceHits}개`;
     return { score, basis };
   }
 
@@ -5229,6 +5249,51 @@
       .filter((token) => !/^20\d{2}년?$/.test(token))
       .filter((token) => token.length >= 2)
       .slice(0, 12);
+  }
+
+  function releaseEvidenceTokens(release) {
+    const generic = new Set([
+      ...articleGroupStopwords(),
+      "성과",
+      "사업",
+      "프로그램",
+      "교육",
+      "지원",
+      "운영",
+      "결과",
+      "발표",
+      "참여",
+      "협력",
+      "진행",
+    ]);
+    return tokenizeForMatch([
+      release?.title,
+      release?.subtitle,
+      release?.summary,
+      release?.body,
+      ...(Array.isArray(release?.tags) ? release.tags : []),
+    ].filter(Boolean).join(" "))
+      .filter((token) => !generic.has(token))
+      .filter((token) => !/^20\d{2}년?$/.test(token))
+      .filter((token) => token.length >= 2)
+      .slice(0, 30);
+  }
+
+  function articleSemanticConcepts(value) {
+    const text = normalizeArticleComparableText(value);
+    const concepts = [];
+    const groups = [
+      ["career", /취업|진로|직무|커리어|실무|신입사원|채용|청년/],
+      ["engineering-accreditation", /공학교육인증|인증평가|ngr/],
+      ["ai", /인공지능|\bai\b|ai x|aix/],
+      ["global", /글로벌|국제|해외|베트남|포덤|프로젝트\s*학기/],
+      ["volunteer", /봉사|의료봉사|재능기부/],
+      ["agreement", /업무협약|협약|mou|맞손/],
+    ];
+    groups.forEach(([concept, pattern]) => {
+      if (pattern.test(text)) concepts.push(concept);
+    });
+    return concepts;
   }
 
   function releaseArticleDateDistance(article, release) {

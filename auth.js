@@ -2,7 +2,7 @@
   const SUPABASE_URL = "https://ozucabnjnnvjezpeffdt.supabase.co";
   const SUPABASE_KEY = "sb_publishable_SAR-hOBRuo8F2EzeN0uPLA_OLmk3_Sw";
   const ACCOUNT_EMAIL_DOMAIN = "account.chosunmedia.kr";
-  const APP_SCRIPT_VERSION = "20260806-strict-release-match-v1";
+  const APP_SCRIPT_VERSION = "20260806-strict-release-match-v2";
   const authRoot = document.querySelector("#auth-root");
   const authModalRoot = document.querySelector("#auth-modal-root");
   const appRoot = document.querySelector("#app");
