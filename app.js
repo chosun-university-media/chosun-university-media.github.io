@@ -52,7 +52,7 @@
   };
 
   const MATCH_THRESHOLD = 56;
-  const MATCHING_RULE_VERSION = "20260806-strict-release-v2";
+  const MATCHING_RULE_VERSION = "20260806-strict-release-v3";
   const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
   const OFFICIAL_RELEASE_SOURCE_VERSION = "20260714-official-pagination-v7";
   const OFFICIAL_BASELINE_RELEASE_VERSION = "20260714-july9-official-v4";
@@ -5220,12 +5220,12 @@
       Math.min(18, coreHits * 5) +
       Math.min(12, titleAnchorHits * 6) +
       Math.min(15, evidenceHits * 3) +
-      Math.min(8, semanticHits * 8) +
+      Math.min(14, semanticHits * 14) +
       dateBonus
     );
     const rawScore = Math.max(weightedScore, exactTitleScore);
     const score = clamp(strongAnchor ? rawScore : Math.min(rawScore, MATCH_THRESHOLD - 1), 0, 100);
-    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 고유 핵심어 ${titleAnchorHits}개, 내용 근거 ${evidenceHits}개`;
+    const basis = `제목 ${Math.round(titleOverlap * 100)}%, 내용 ${Math.round(contentOverlap * 100)}%, 고유 핵심어 ${titleAnchorHits}개, 내용 근거 ${evidenceHits}개, 의미 일치 ${semanticHits}개`;
     return { score, basis };
   }
 
