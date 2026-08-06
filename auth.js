@@ -179,7 +179,14 @@
     authBusy = true;
     setFormBusy(form, true);
 
-    const values = Object.fromEntries(new FormData(form));
+    const fieldValue = (name) => form.elements.namedItem(name)?.value || "";
+    const values = {
+      name: fieldValue("name"),
+      department: fieldValue("department"),
+      username: fieldValue("username"),
+      password: fieldValue("password"),
+      passwordConfirm: fieldValue("passwordConfirm"),
+    };
     try {
       if (form.dataset.authForm === "signup") await signup(values);
       else await login(values);
