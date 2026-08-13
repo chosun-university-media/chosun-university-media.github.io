@@ -693,7 +693,7 @@ function parseNewsDate(value) {
 }
 
 function isChosunUniversityArticle(item) {
-  return /조선대학교|조선대/i.test(`${item.title || ""} ${item.excerpt || ""}`);
+  return /(?:조선대학교(?!\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원)|조선대(?!학교|\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원))/i.test(item.title || "") || /조선(?:대학교|대)\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원/i.test(item.title || "");
 }
 
 function inferMediaType(outlet) {
@@ -910,29 +910,46 @@ async function fetchText(url) {
 }
 
 async function fetchPage(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Chosun-University-Media-Monitor/1.0",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
+  const target = new URL(url);
+  const isGoogleNews = target.hostname === "news.google.com";
+  const attempts = isGoogleNews ? 3 : 1;
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          Accept: isGoogleNews
+            ? "application/rss+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7"
+            : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+        },
+        redirect: "follow",
+        signal: controller.signal,
+      });
 
-    if (!response.ok) throw new Error(`official site ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    const charset = response.headers.get("content-type")?.match(/charset=([^;]+)/i)?.[1] || "utf-8";
-    return {
-      text: decodeBuffer(buffer, charset),
-      url: response.url || url,
-      contentType: response.headers.get("content-type") || "",
-    };
-  } finally {
-    clearTimeout(timer);
+      if (!response.ok) throw new Error(`${isGoogleNews ? "google news" : "official site"} ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      const charset = response.headers.get("content-type")?.match(/charset=([^;]+)/i)?.[1] || "utf-8";
+      return {
+        text: decodeBuffer(buffer, charset),
+        url: response.url || url,
+        contentType: response.headers.get("content-type") || "",
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts) await wait(350 * (attempt + 1));
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw lastError || new Error("source fetch failed");
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function decodeBuffer(buffer, charset) {
