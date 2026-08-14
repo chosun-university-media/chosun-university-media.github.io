@@ -52,7 +52,7 @@
   };
 
   const MATCH_THRESHOLD = 56;
-  const MATCHING_RULE_VERSION = "20260813-relevance-v1";
+  const MATCHING_RULE_VERSION = "20260814-relevance-v2";
   const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
   const OFFICIAL_RELEASE_SOURCE_VERSION = "20260714-official-pagination-v7";
   const OFFICIAL_BASELINE_RELEASE_VERSION = "20260714-july9-official-v4";
@@ -4549,6 +4549,7 @@
     if (isAffiliatedOnlyArticle(article)) return true;
     const text = articleOrganizationText(article);
     if (/(?:조선대학교(?!\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원)|조선대(?!학교|\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원))/i.test(text)) return true;
+    if (hasConflictingOrganizationTitle(article.title)) return false;
 
     const release = releases.find((item) => item.id === article.releaseId);
     const candidates = release ? [release] : releases;
@@ -4559,6 +4560,11 @@
       const phraseScore = articlePhraseSimilarity(article.title || "", item.title || "");
       return result.score >= 72 && distinctiveHits >= 2 && phraseScore >= 0.42;
     });
+  }
+
+  function hasConflictingOrganizationTitle(value) {
+    const title = normalizeWhitespace(value).replace(/조선대학교|조선대/g, " ");
+    return /(?:[가-힣]{2,12}대학교|(?:서울|연세|고려|서강|성균관|한양|중앙|경희|건국|동국|홍익|이화|숙명|전남|전북|강원|충남|충북|경상|부산|제주|한국기술교육|한기|광주|호남)대(?:\s|,|·|-|$)|남해군|광양시|대전시|광주시|전남도|전북도|[가-힣]{2,12}(?:교육청|시청|군청|도청))/i.test(title);
   }
 
   function mergeCollectedArticles(items) {
