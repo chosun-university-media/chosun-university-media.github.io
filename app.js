@@ -4708,6 +4708,7 @@
 
   async function fetchOfficialReleaseItems() {
     const apiUrls = [
+      `./data/official-releases.json?v=${Date.now()}`,
       platformApiUrl(`api/official-releases?url=${encodeURIComponent(OFFICIAL_RELEASE_URL)}&start=${encodeURIComponent(ACTUAL_USE_START_DATE)}`),
       `${LOCAL_COLLECTOR_URL}?url=${encodeURIComponent(OFFICIAL_RELEASE_URL)}&start=${encodeURIComponent(ACTUAL_USE_START_DATE)}`,
     ];

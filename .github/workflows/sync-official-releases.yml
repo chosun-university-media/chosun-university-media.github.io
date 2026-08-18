@@ -1,0 +1,36 @@
+name: Sync official releases
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-official-releases
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Collect official releases
+        run: node scripts/sync-official-releases.cjs
+      - name: Commit updated data
+        shell: bash
+        run: |
+          if git diff --quiet -- data/official-releases.json; then
+            echo "No release changes."
+            exit 0
+          fi
+          git config user.name "chosun-media-bot"
+          git config user.email "chosun-media-bot@users.noreply.github.com"
+          git add data/official-releases.json
+          git commit -m "보도자료 자동 동기화"
+          git push
