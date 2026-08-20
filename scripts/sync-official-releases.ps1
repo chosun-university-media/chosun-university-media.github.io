@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw "Official release collection failed." }
 if ($LASTEXITCODE -eq 0) { exit 0 }
 
 & $gitPath -C $repoRoot add -- data/official-releases.json
-& $gitPath -C $repoRoot commit -m "보도자료 자동 동기화"
+& $gitPath -C $repoRoot commit -m "Sync official releases"
 if ($LASTEXITCODE -ne 0) { throw "Git commit failed." }
 
 & $gitPath -C $repoRoot push origin HEAD:main
