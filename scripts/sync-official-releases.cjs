@@ -22,6 +22,15 @@ async function main() {
     items,
   };
   await fs.mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
+  try {
+    const previous = JSON.parse(await fs.readFile(OUTPUT_PATH, "utf8"));
+    if (JSON.stringify(previous.items || []) === JSON.stringify(items)) {
+      console.log(`공식 보도자료 ${items.length}건, 변경 없음.`);
+      return;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   await fs.writeFile(OUTPUT_PATH, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   console.log(`공식 보도자료 ${items.length}건을 저장했습니다.`);
 }
