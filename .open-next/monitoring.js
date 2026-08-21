@@ -184,8 +184,50 @@ function daumNewsDateFromUrl(value) {
 
 function dedupeNewsItems(items) {
   const byUrl = uniqueBy(items, (item) => canonicalNewsUrl(item.url) || `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`);
-  return uniqueBy(byUrl, (item) => `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`)
-    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+  const unique = [];
+  byUrl.forEach((item) => {
+    const duplicate = unique.some((current) => (
+      stableKey(current.outlet) === stableKey(item.outlet) &&
+      String(current.publishedAt || "").slice(0, 10) === String(item.publishedAt || "").slice(0, 10) &&
+      isSameNewsTitle(current.title, item.title)
+    ));
+    if (!duplicate) unique.push(item);
+  });
+  return unique.sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+}
+
+function isSameNewsTitle(left, right) {
+  const leftTitle = compactNewsTitle(left);
+  const rightTitle = compactNewsTitle(right);
+  if (!leftTitle || !rightTitle) return false;
+  if (leftTitle === rightTitle) return true;
+  if (Math.min(leftTitle.length, rightTitle.length) >= 12 && (leftTitle.includes(rightTitle) || rightTitle.includes(leftTitle))) return true;
+  return newsTitleDice(leftTitle, rightTitle) >= 0.42;
+}
+
+function compactNewsTitle(value) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/조선대학교|조선대/g, "")
+    .replace(/[^a-z0-9가-힣]+/g, "");
+}
+
+function newsTitleDice(left, right) {
+  if (left.length < 2 || right.length < 2) return 0;
+  const counts = new Map();
+  for (let index = 0; index < left.length - 1; index += 1) {
+    const gram = left.slice(index, index + 2);
+    counts.set(gram, (counts.get(gram) || 0) + 1);
+  }
+  let matches = 0;
+  for (let index = 0; index < right.length - 1; index += 1) {
+    const gram = right.slice(index, index + 2);
+    const count = counts.get(gram) || 0;
+    if (!count) continue;
+    matches += 1;
+    counts.set(gram, count - 1);
+  }
+  return (2 * matches) / (left.length + right.length - 2);
 }
 
 function canonicalNewsUrl(value) {
