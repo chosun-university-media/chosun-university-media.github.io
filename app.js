@@ -52,7 +52,7 @@
   };
 
   const MATCH_THRESHOLD = 56;
-  const MATCHING_RULE_VERSION = "20260814-relevance-v2";
+  const MATCHING_RULE_VERSION = "20260820-daum-dedupe-v1";
   const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
   const OFFICIAL_RELEASE_SOURCE_VERSION = "20260714-official-pagination-v7";
   const OFFICIAL_BASELINE_RELEASE_VERSION = "20260714-july9-official-v4";
@@ -325,10 +325,11 @@
       normalized.attentionReason = articleAttentionReason(normalized);
       return normalized;
     });
+    const deduplicated = dedupeReleaseCoverageArticles(rematched);
     return {
       ...input,
-      articles: filterArticleItems(rematched.filter((article) => !isAffiliatedOnlyArticle(article))),
-      affiliatedArticles: filterArticleItems(rematched.filter((article) => isAffiliatedOnlyArticle(article))),
+      articles: filterArticleItems(deduplicated.filter((article) => !isAffiliatedOnlyArticle(article))),
+      affiliatedArticles: filterArticleItems(deduplicated.filter((article) => isAffiliatedOnlyArticle(article))),
       activity: [
         {
           id: uid("act"),
@@ -352,7 +353,7 @@
       ...(Array.isArray(input.articles) ? input.articles : []),
       ...(Array.isArray(input.affiliatedArticles) ? input.affiliatedArticles : []),
     ]);
-    const relevant = allArticles.filter((article) => isRelevantChosunArticle(article, releases));
+    const relevant = dedupeReleaseCoverageArticles(allArticles.filter((article) => isRelevantChosunArticle(article, releases)));
     return {
       ...input,
       articles: filterArticleItems(relevant.filter((article) => !isAffiliatedOnlyArticle(article))),
@@ -5116,8 +5117,9 @@
       if ((article.releaseId || "") !== before) changed += 1;
       article.attentionReason = articleAttentionReason(article);
     });
-    state.articles = filterArticleItems(rematched.filter((article) => !isAffiliatedOnlyArticle(article) && isRelevantChosunArticle(article, state.releases)));
-    state.affiliatedArticles = filterArticleItems(rematched.filter((article) => isAffiliatedOnlyArticle(article) && isRelevantChosunArticle(article, state.releases)));
+    const deduplicated = dedupeReleaseCoverageArticles(rematched);
+    state.articles = filterArticleItems(deduplicated.filter((article) => !isAffiliatedOnlyArticle(article) && isRelevantChosunArticle(article, state.releases)));
+    state.affiliatedArticles = filterArticleItems(deduplicated.filter((article) => isAffiliatedOnlyArticle(article) && isRelevantChosunArticle(article, state.releases)));
     if (!shouldRender) return;
     addActivity("자동 매칭", `기사 ${matched}건 매칭, ${changed}건 연결 변경`);
     saveState();

@@ -9,9 +9,12 @@
     <title>조선대학교 언론 관리 플랫폼</title>
     <link rel="icon" href="./assets/chosun-symbol-basic.jpg" />
     <link rel="stylesheet" href="./styles.css?v=20260724-nav-badge-v5" />
+    <link rel="stylesheet" href="./auth.css?v=20260821-password-v1" />
   </head>
   <body>
-    <div id="app" class="app-shell">
+    <main id="auth-root" class="auth-root" aria-live="polite"></main>
+
+    <div id="app" class="app-shell" hidden>
       <aside class="sidebar" aria-label="주요 메뉴">
         <button class="brand" type="button" data-action="go-home" aria-label="한눈에 보기로 이동">
           <img src="./assets/chosun-symbol-basic.jpg" alt="조선대학교 로고" class="brand-symbol-only" />
@@ -45,8 +48,10 @@
     </div>
 
     <div id="modal-root" class="modal-root" aria-live="polite"></div>
+    <div id="auth-modal-root" class="auth-modal-root" aria-live="polite"></div>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
     <input id="backup-import" type="file" accept="application/json" hidden />
-    <script src="./app.js?v=20260724-nav-badge-v5"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
+    <script src="./auth.js?v=20260821-password-v1"></script>
   </body>
 </html>

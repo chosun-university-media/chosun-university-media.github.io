@@ -1,12 +1,13 @@
 const OFFICIAL_RELEASE_URL = "https://www3.chosun.ac.kr/chosun/2607/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGY2hvc3VuJTJGNzIlMkZhcnRjbExpc3QuZG8lM0Y%3D";
-const RUNTIME_ENV = typeof process === "undefined" ? {} : process.env || {};
-const OFFICIAL_RELEASE_START_DATE = RUNTIME_ENV.OFFICIAL_RELEASE_START_DATE || "2026-07-09";
-const MAX_OFFICIAL_ITEMS = Number(RUNTIME_ENV.OFFICIAL_RELEASE_LIMIT || 100);
-const MAX_OFFICIAL_PAGES = Number(RUNTIME_ENV.OFFICIAL_RELEASE_PAGE_LIMIT || 20);
-const MAX_NEWS_ITEMS = Number(RUNTIME_ENV.NEWS_MONITOR_LIMIT || 100);
-const FETCH_TIMEOUT_MS = Number(RUNTIME_ENV.OFFICIAL_FETCH_TIMEOUT_MS || 15000);
+const OFFICIAL_RELEASE_START_DATE = process.env.OFFICIAL_RELEASE_START_DATE || "2026-07-09";
+const MAX_OFFICIAL_ITEMS = Number(process.env.OFFICIAL_RELEASE_LIMIT || 100);
+const MAX_OFFICIAL_PAGES = Number(process.env.OFFICIAL_RELEASE_PAGE_LIMIT || 20);
+const MAX_NEWS_ITEMS = Number(process.env.NEWS_MONITOR_LIMIT || 100);
+const FETCH_TIMEOUT_MS = Number(process.env.OFFICIAL_FETCH_TIMEOUT_MS || 15000);
+const FETCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const portalArticleCache = new Map();
 const newsSourceByTitle = new Map();
+const pageCache = new Map();
 
 async function collectNewsMonitor(requestUrl) {
   const query = normalizeWhitespace(requestUrl.searchParams.get("query") || "\"조선대학교\" OR \"조선대\"");
@@ -15,22 +16,43 @@ async function collectNewsMonitor(requestUrl) {
   const rssUrl = googleNewsRssUrl(query, date);
 
   try {
-    const rss = await fetchText(rssUrl);
-    const parsedItems = parseGoogleNewsRss(rss, date)
+    const results = await Promise.allSettled([
+      fetchGoogleNewsText(rssUrl),
+      fetchDaumNewsItems(query, date),
+    ]);
+    const rss = results[0].status === "fulfilled" ? results[0].value : "";
+    const daumItems = results[1].status === "fulfilled" ? results[1].value : [];
+    if (!rss && results[1].status === "rejected") {
+      throw results[0].reason || results[1].reason || new Error("news sources returned no items");
+    }
+    const parsedItems = dedupeNewsItems([
+      ...daumItems,
+      ...parseGoogleNewsRss(rss, date),
+    ])
       .filter((item) => scope === "external" || isChosunUniversityArticle(item))
       .slice(0, MAX_NEWS_ITEMS);
     const items = await enrichPortalNewsItems(parsedItems);
+    const warnings = results
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason?.message)
+      .filter(Boolean);
 
     return {
       status: 200,
       payload: {
         source: rssUrl,
+        sources: ["Google News", "Bing News", "Daum News"],
         query,
         scope,
         date,
         scannedAt: new Date().toISOString(),
         count: items.length,
+        sourceCounts: {
+          daum: daumItems.length,
+          googleBing: parseGoogleNewsRss(rss, date).length,
+        },
         items,
+        ...(warnings.length ? { warnings } : {}),
       },
     };
   } catch (error) {
@@ -49,22 +71,174 @@ async function collectNewsMonitor(requestUrl) {
   }
 }
 
+async function fetchGoogleNewsText(rssUrl) {
+  const target = new URL(rssUrl);
+  const search = target.searchParams.get("q") || "";
+  const results = await Promise.allSettled([fetchText(rssUrl), fetchBingNewsText(search)]);
+  const feeds = results
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
+  if (feeds.length) return feeds.join("\n");
+  const failed = results.find((result) => result.status === "rejected");
+  throw failed?.reason || new Error("news rss returned no items");
+}
+
+async function fetchBingNewsText(search) {
+  const queries = bingFallbackQueries(search);
+  const results = await Promise.allSettled(
+    queries.map((query) => fetchText(`https://www.bing.com/news/search?q=${encodeURIComponent(query)}&format=rss&setlang=ko-kr`))
+  );
+  const feeds = results
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
+  if (feeds.length) return feeds.join("\n");
+  const failed = results.find((result) => result.status === "rejected");
+  throw failed?.reason || new Error("news rss returned no items");
+}
+
+async function fetchDaumNewsItems(search, startDate) {
+  const queries = bingFallbackQueries(search).slice(0, 4);
+  const requests = queries.flatMap((query) => {
+    const pageCount = /^(?:"조선대학교"|"조선대")$/.test(query) ? 2 : 1;
+    return Array.from({ length: pageCount }, (_, index) => fetchText(daumNewsSearchUrl(query, index + 1)));
+  });
+  const results = await Promise.allSettled(requests);
+  const pages = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  if (!pages.length) {
+    const failed = results.find((result) => result.status === "rejected");
+    throw failed?.reason || new Error("daum news returned no items");
+  }
+  return dedupeNewsItems(pages.flatMap((html) => parseDaumNewsHtml(html, startDate)));
+}
+
+function daumNewsSearchUrl(query, page = 1) {
+  const url = new URL("https://m.search.daum.net/search");
+  url.searchParams.set("w", "news");
+  url.searchParams.set("sort", "recency");
+  url.searchParams.set("q", normalizeWhitespace(query));
+  if (page > 1) url.searchParams.set("p", String(page));
+  return url.href;
+}
+
+function parseDaumNewsHtml(html, startDate) {
+  const blocks = String(html || "").match(/<li\b[^>]*data-docid=["'][^"']+["'][^>]*>[\s\S]*?<\/li>/gi) || [];
+  return blocks
+    .map(daumNewsArticleFromBlock)
+    .filter(Boolean)
+    .filter((item) => String(item.publishedAt || "").slice(0, 10) >= startDate)
+    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+}
+
+function daumNewsArticleFromBlock(block) {
+  const url = normalizeDaumNewsUrl(block.match(/href=["'](https?:\/\/(?:v\.)?daum\.net\/v\/\d+)["']/i)?.[1] || "");
+  const titleBlock = block.match(/<strong\b[^>]*class=["'][^"']*\btit-g\b[^"']*["'][^>]*>([\s\S]*?)<\/strong>/i)?.[1] || "";
+  const outletTag = block.match(/<strong\b[^>]*class=["'][^"']*\btit_item\b[^"']*["'][^>]*>/i)?.[0] || "";
+  const excerptBlock = block.match(/<(?:p|div)\b[^>]*class=["'][^"']*\bconts-desc\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:p|div)>/i)?.[1] || "";
+  const title = htmlToText(titleBlock);
+  const outlet = normalizeNewsOutlet(attrValue(outletTag, "title"));
+  const published = daumNewsDateFromUrl(url);
+  if (!title || !outlet || !url || !published) return null;
+
+  const text = `${title} ${outlet}`;
+  const mediaType = inferMediaType(outlet);
+  const sentiment = inferSentiment(text);
+  const risk = inferRisk(text, sentiment);
+  return {
+    id: `daum-${url.match(/\/v\/(\d+)/)?.[1] || stableKey(title)}`,
+    title,
+    outlet,
+    reporter: "자동 수집",
+    url,
+    publishedAt: published,
+    sentiment,
+    topic: inferCategory(text),
+    mediaType,
+    channel: mediaType === "broadcast" ? "broadcast" : "online",
+    influenceScore: inferInfluence(outlet, mediaType),
+    releaseId: "",
+    matchScore: 0,
+    keywords: extractKeywords(text, 6),
+    risk,
+    status: risk === "high" ? "escalated" : "unreviewed",
+    excerpt: shorten(htmlToText(excerptBlock) || `${outlet}에서 보도한 조선대학교 관련 기사입니다.`, 360),
+    memo: "Daum 뉴스 검색에서 자동 수집되었습니다.",
+    attentionReason: attentionReasonForNews(text, mediaType, sentiment, risk),
+    sourceType: "daum-news",
+    portalOutlet: "Daum 뉴스",
+    portalUrl: url,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeDaumNewsUrl(value) {
+  const match = String(value || "").match(/https?:\/\/(?:v\.)?daum\.net\/v\/(\d+)/i);
+  return match ? `https://v.daum.net/v/${match[1]}` : "";
+}
+
+function daumNewsDateFromUrl(value) {
+  const timestamp = String(value || "").match(/\/v\/(20\d{12,})/)?.[1] || "";
+  if (timestamp.length < 12) return "";
+  return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)}T${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}`;
+}
+
+function dedupeNewsItems(items) {
+  const byUrl = uniqueBy(items, (item) => canonicalNewsUrl(item.url) || `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`);
+  return uniqueBy(byUrl, (item) => `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`)
+    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+}
+
+function canonicalNewsUrl(value) {
+  try {
+    const url = new URL(value);
+    url.protocol = "https:";
+    url.hash = "";
+    ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"].forEach((key) => url.searchParams.delete(key));
+    return url.href.replace(/\/$/, "").toLowerCase();
+  } catch (error) {
+    return normalizeWhitespace(value).replace(/#.*$/, "").replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function bingFallbackQueries(search) {
+  const cleaned = normalizeWhitespace(String(search || "").replace(/\b(?:after|before):\d{4}-\d{2}-\d{2}\b/gi, ""));
+  const quoted = [...cleaned.matchAll(/"([^"]+)"/g)].map((match) => normalizeWhitespace(match[1])).filter(Boolean);
+  const schoolAliases = new Set(["조선대", "조선대학교"]);
+  const hasSchoolAlias = quoted.some((term) => schoolAliases.has(term));
+  if (hasSchoolAlias) {
+    const titleTerms = quoted.filter((term) => !schoolAliases.has(term));
+    if (!titleTerms.length) return ['"조선대학교"', '"조선대"'];
+    const queries = [];
+    for (let index = 0; index < titleTerms.length; index += 2) {
+      queries.push(normalizeWhitespace(`"조선대" ${titleTerms.slice(index, index + 2).join(" ")}`));
+    }
+    return uniqueBy(queries, (query) => query).slice(0, 8);
+  }
+  const naturalQuery = normalizeWhitespace(cleaned.replace(/[()[\]"]/g, " "));
+  return naturalQuery ? [naturalQuery] : ["조선대학교"];
+}
+
 async function collectOfficialReleases(requestUrl) {
   const sourceUrl = officialSourceUrl(requestUrl.searchParams.get("url"));
   const startDate = normalizeDate(requestUrl.searchParams.get("start")) || OFFICIAL_RELEASE_START_DATE;
 
   try {
-    const listHtml = await fetchText(sourceUrl);
-    const links = await collectOfficialListLinks(listHtml, sourceUrl, startDate);
+    const listHtml = await fetchOfficialText(sourceUrl);
+    const links = isOfficialMarkdown(listHtml)
+      ? parseOfficialMarkdownList(listHtml, startDate)
+      : await collectOfficialListLinks(listHtml, sourceUrl, startDate);
     const items = [];
 
-    for (const link of links) {
-      try {
-        const item = await fetchOfficialDetail(link, sourceUrl);
+    for (let index = 0; index < links.length; index += 5) {
+      const batch = await Promise.all(links.slice(index, index + 5).map(async (link) => {
+        try {
+          return await fetchOfficialDetail(link, sourceUrl);
+        } catch (error) {
+          return releaseFromListLink(link);
+        }
+      }));
+      for (const item of batch) {
         if (item) items.push(item);
-      } catch (error) {
-        const fallback = releaseFromListLink(link);
-        if (fallback) items.push(fallback);
       }
     }
 
@@ -93,6 +267,50 @@ async function collectOfficialReleases(requestUrl) {
   }
 }
 
+async function fetchOfficialText(url) {
+  try {
+    return await fetchText(url);
+  } catch (directError) {
+    try {
+      return await fetchText(officialProxyUrl(url));
+    } catch (proxyError) {
+      throw new Error(`${directError.message}; official fallback ${proxyError.message}`);
+    }
+  }
+}
+
+function officialProxyUrl(value) {
+  const url = new URL(value, OFFICIAL_RELEASE_URL);
+  if (!url.hostname.endsWith("chosun.ac.kr")) return url.href;
+  return `https://r.jina.ai/http://${url.host}${url.pathname}${url.search}`;
+}
+
+function isOfficialMarkdown(value) {
+  return /(?:^|\n)Markdown Content:\s*(?:\n|$)/i.test(String(value || ""));
+}
+
+function parseOfficialMarkdownList(source, startDate) {
+  const pattern = /\*\*\[([^\]]+)\]\((https?:\/\/(?:www3\.)?chosun\.ac\.kr\/bbs\/chosun\/72\/\d+\/artclView\.do[^)]*)\)\*\*([\s\S]*?)(?=\n\s*\*\*\[|$)/gi;
+  const items = [];
+  for (const match of String(source || "").matchAll(pattern)) {
+    const title = normalizeOfficialTitle(match[1]);
+    const publishAt = normalizeDate(match[3].match(/20\d{2}[.\/-]\d{1,2}[.\/-]\d{1,2}/)?.[0]);
+    const sourceUrl = String(match[2]).replace(/^http:/i, "https:");
+    if (!title || !publishAt || publishAt < startDate || !isLikelyOfficialReleaseTitle(title)) continue;
+    items.push({ title, sourceUrl, publishAt, rowText: markdownPlainText(match[3]) });
+  }
+  return uniqueBy(items, (item) => officialArticleNoFromUrl(item.sourceUrl) || item.sourceUrl).slice(0, MAX_OFFICIAL_ITEMS);
+}
+
+function markdownPlainText(value) {
+  return normalizeWhitespace(
+    String(value || "")
+      .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[`*_>#~-]+/g, " ")
+  );
+}
+
 async function collectOfficialListLinks(firstPageHtml, sourceUrl, startDate) {
   const collected = [];
   let pageHtml = firstPageHtml;
@@ -112,7 +330,7 @@ async function collectOfficialListLinks(firstPageHtml, sourceUrl, startDate) {
     page += 1;
     const nextPageUrl = officialListPageUrl(sourceUrl, firstPageHtml, page);
     if (!nextPageUrl) break;
-    pageHtml = await fetchText(nextPageUrl);
+    pageHtml = await fetchOfficialText(nextPageUrl);
   }
 
   return uniqueBy(collected, (item) => officialArticleNoFromUrl(item.sourceUrl) || item.sourceUrl || `${item.publishAt}-${item.title}`)
@@ -151,12 +369,15 @@ function safeDecodeURIComponent(value) {
 
 async function fetchOfficialDetail(link, sourceUrl) {
   const canFetchDetail = link.sourceUrl && /^https?:\/\//i.test(link.sourceUrl);
-  const detailHtml = canFetchDetail ? await fetchText(link.sourceUrl) : "";
-  const detailTitle = normalizeOfficialTitle(extractDetailTitle(detailHtml));
+  const detailHtml = canFetchDetail ? await fetchOfficialText(link.sourceUrl) : "";
+  const markdownDetail = isOfficialMarkdown(detailHtml);
+  const detailTitle = normalizeOfficialTitle(markdownDetail ? extractOfficialMarkdownTitle(detailHtml) : extractDetailTitle(detailHtml));
   const title = officialTitleFromListAndDetail(link.title, detailTitle);
   if (!isLikelyOfficialReleaseTitle(title)) return releaseFromListLink(link);
 
-  const detailText = extractDetailBody(detailHtml, title) || htmlToText(detailHtml);
+  const detailText = markdownDetail
+    ? extractOfficialMarkdownBody(detailHtml)
+    : extractDetailBody(detailHtml, title) || htmlToText(detailHtml);
   const combinedText = normalizeWhitespace(`${link.rowText || ""} ${detailText}`);
   const dateInfo = officialPublishDate(link, detailHtml, detailText, combinedText);
   const publishAt = dateInfo.value;
@@ -188,6 +409,16 @@ async function fetchOfficialDetail(link, sourceUrl) {
     syncedAt: new Date().toISOString(),
     dateSource: dateInfo.source,
   };
+}
+
+function extractOfficialMarkdownTitle(source) {
+  const content = String(source || "").split(/(?:^|\n)Markdown Content:\s*(?:\n|$)/i).pop() || "";
+  return normalizeWhitespace(content.match(/^>\s*(.+)$/m)?.[1] || "");
+}
+
+function extractOfficialMarkdownBody(source) {
+  const content = String(source || "").split(/(?:^|\n)Markdown Content:\s*(?:\n|$)/i).pop() || "";
+  return markdownPlainText(content.replace(/^>\s*.+$/m, " "));
 }
 
 function releaseFromListLink(link) {
@@ -313,7 +544,7 @@ function googleNewsRssUrl(query, startDate = "") {
 function parseGoogleNewsRss(xml, startDate) {
   const blocks = String(xml || "").match(/<item\b[\s\S]*?<\/item>/gi) || [];
   const items = blocks.map((block) => newsArticleFromRssItem(block)).filter(Boolean);
-  return uniqueBy(items, (item) => item.url || `${item.publishedAt}-${item.title}`)
+  return uniqueBy(items, (item) => `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`)
     .filter((item) => String(item.publishedAt || "").slice(0, 10) >= startDate)
     .sort((a, b) => String(b.publishedAt).localeCompare(String(a.publishedAt)));
 }
@@ -321,7 +552,7 @@ function parseGoogleNewsRss(xml, startDate) {
 function newsArticleFromRssItem(block) {
   const rawTitle = xmlTagValue(block, "title");
   const url = xmlTagValue(block, "link");
-  const outlet = xmlTagValue(block, "source") || outletFromGoogleTitle(rawTitle);
+  const outlet = normalizeNewsOutlet(xmlTagValue(block, "source") || xmlTagValue(block, "News:Source") || outletFromGoogleTitle(rawTitle));
   const published = parseNewsDate(xmlTagValue(block, "pubDate"));
   const title = cleanGoogleNewsTitle(rawTitle, outlet);
   if (!title || !url || !published) return null;
@@ -355,6 +586,11 @@ function newsArticleFromRssItem(block) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+function normalizeNewsOutlet(value) {
+  const outlet = normalizeWhitespace(value).replace(/\s+on MSN$/i, "");
+  return /^etnews\.com$/i.test(outlet) ? "전자신문" : outlet;
 }
 
 async function enrichPortalNewsItems(items) {
@@ -552,7 +788,7 @@ function parseNewsDate(value) {
 }
 
 function isChosunUniversityArticle(item) {
-  return /조선대학교|조선대/i.test(`${item.title || ""} ${item.excerpt || ""}`);
+  return /(?:조선대학교(?!\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원)|조선대(?!학교|\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원))/i.test(item.title || "") || /조선(?:대학교|대)\s*(?:부속\s*)?(?:치과\s*|한방\s*)?병원/i.test(item.title || "");
 }
 
 function inferMediaType(outlet) {
@@ -769,29 +1005,58 @@ async function fetchText(url) {
 }
 
 async function fetchPage(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Chosun-University-Media-Monitor/1.0",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
+  const cached = pageCache.get(url);
+  if (cached && Date.now() - cached.cachedAt < FETCH_CACHE_TTL_MS) return cached.page;
 
-    if (!response.ok) throw new Error(`official site ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    const charset = response.headers.get("content-type")?.match(/charset=([^;]+)/i)?.[1] || "utf-8";
-    return {
-      text: decodeBuffer(buffer, charset),
-      url: response.url || url,
-      contentType: response.headers.get("content-type") || "",
-    };
-  } finally {
-    clearTimeout(timer);
+  const target = new URL(url);
+  const isGoogleNews = target.hostname === "news.google.com";
+  const isDaumSearch = target.hostname === "m.search.daum.net";
+  const isJinaReader = target.hostname === "r.jina.ai";
+  const attempts = isGoogleNews ? 3 : isDaumSearch || isJinaReader ? 2 : 1;
+  const timeoutMs = isJinaReader ? Math.max(FETCH_TIMEOUT_MS, 45000) : FETCH_TIMEOUT_MS;
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": isDaumSearch
+            ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148"
+            : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          Accept: isGoogleNews
+            ? "application/rss+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7"
+            : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+        },
+        redirect: "follow",
+        signal: controller.signal,
+        ...(isGoogleNews ? { cf: { cacheEverything: true, cacheTtl: 300 } } : {}),
+      });
+
+      if (!response.ok) throw new Error(`${isGoogleNews ? "google news" : "official site"} ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      const charset = response.headers.get("content-type")?.match(/charset=([^;]+)/i)?.[1] || "utf-8";
+      const page = {
+        text: decodeBuffer(buffer, charset),
+        url: response.url || url,
+        contentType: response.headers.get("content-type") || "",
+      };
+      pageCache.set(url, { cachedAt: Date.now(), page });
+      return page;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts) await wait(350 * (attempt + 1));
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  if (cached?.page) return cached.page;
+  throw lastError || new Error("source fetch failed");
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function decodeBuffer(buffer, charset) {
@@ -965,8 +1230,4 @@ function todayDate() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
-export {
-  collectNewsMonitor,
-  collectOfficialReleases,
-  OFFICIAL_RELEASE_URL,
-};
+export { collectNewsMonitor, collectOfficialReleases };

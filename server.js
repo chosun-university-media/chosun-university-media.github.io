@@ -168,20 +168,41 @@ async function collectNewsMonitor(requestUrl, res) {
   const rssUrl = googleNewsRssUrl(query, date);
 
   try {
-    const rss = await fetchGoogleNewsText(rssUrl);
-    const parsedItems = parseGoogleNewsRss(rss, date)
+    const results = await Promise.allSettled([
+      fetchGoogleNewsText(rssUrl),
+      fetchDaumNewsItems(query, date),
+    ]);
+    const rss = results[0].status === "fulfilled" ? results[0].value : "";
+    const daumItems = results[1].status === "fulfilled" ? results[1].value : [];
+    if (!rss && results[1].status === "rejected") {
+      throw results[0].reason || results[1].reason || new Error("news sources returned no items");
+    }
+    const parsedItems = dedupeNewsItems([
+      ...daumItems,
+      ...parseGoogleNewsRss(rss, date),
+    ])
       .filter((item) => scope === "external" || isChosunUniversityArticle(item))
       .slice(0, MAX_NEWS_ITEMS);
     const items = await enrichPortalNewsItems(parsedItems);
+    const warnings = results
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason?.message)
+      .filter(Boolean);
 
     sendJson(res, 200, {
       source: rssUrl,
+      sources: ["Google News", "Bing News", "Daum News"],
       query,
       scope,
       date,
       scannedAt: new Date().toISOString(),
       count: items.length,
+      sourceCounts: {
+        daum: daumItems.length,
+        googleBing: parseGoogleNewsRss(rss, date).length,
+      },
       items,
+      ...(warnings.length ? { warnings } : {}),
     });
   } catch (error) {
     sendJson(res, 502, {
@@ -219,6 +240,110 @@ async function fetchBingNewsText(search) {
   if (feeds.length) return feeds.join("\n");
   const failed = results.find((result) => result.status === "rejected");
   throw failed?.reason || new Error("news rss returned no items");
+}
+
+async function fetchDaumNewsItems(search, startDate) {
+  const queries = bingFallbackQueries(search).slice(0, 4);
+  const requests = queries.flatMap((query) => {
+    const pageCount = /^(?:"조선대학교"|"조선대")$/.test(query) ? 2 : 1;
+    return Array.from({ length: pageCount }, (_, index) => fetchText(daumNewsSearchUrl(query, index + 1)));
+  });
+  const results = await Promise.allSettled(requests);
+  const pages = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  if (!pages.length) {
+    const failed = results.find((result) => result.status === "rejected");
+    throw failed?.reason || new Error("daum news returned no items");
+  }
+  return dedupeNewsItems(pages.flatMap((html) => parseDaumNewsHtml(html, startDate)));
+}
+
+function daumNewsSearchUrl(query, page = 1) {
+  const url = new URL("https://m.search.daum.net/search");
+  url.searchParams.set("w", "news");
+  url.searchParams.set("sort", "recency");
+  url.searchParams.set("q", normalizeWhitespace(query));
+  if (page > 1) url.searchParams.set("p", String(page));
+  return url.href;
+}
+
+function parseDaumNewsHtml(html, startDate) {
+  const blocks = String(html || "").match(/<li\b[^>]*data-docid=["'][^"']+["'][^>]*>[\s\S]*?<\/li>/gi) || [];
+  return blocks
+    .map(daumNewsArticleFromBlock)
+    .filter(Boolean)
+    .filter((item) => String(item.publishedAt || "").slice(0, 10) >= startDate)
+    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+}
+
+function daumNewsArticleFromBlock(block) {
+  const url = normalizeDaumNewsUrl(block.match(/href=["'](https?:\/\/(?:v\.)?daum\.net\/v\/\d+)["']/i)?.[1] || "");
+  const titleBlock = block.match(/<strong\b[^>]*class=["'][^"']*\btit-g\b[^"']*["'][^>]*>([\s\S]*?)<\/strong>/i)?.[1] || "";
+  const outletTag = block.match(/<strong\b[^>]*class=["'][^"']*\btit_item\b[^"']*["'][^>]*>/i)?.[0] || "";
+  const excerptBlock = block.match(/<(?:p|div)\b[^>]*class=["'][^"']*\bconts-desc\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:p|div)>/i)?.[1] || "";
+  const title = htmlToText(titleBlock);
+  const outlet = normalizeNewsOutlet(attrValue(outletTag, "title"));
+  const published = daumNewsDateFromUrl(url);
+  if (!title || !outlet || !url || !published) return null;
+
+  const text = `${title} ${outlet}`;
+  const mediaType = inferMediaType(outlet);
+  const sentiment = inferSentiment(text);
+  const risk = inferRisk(text, sentiment);
+  return {
+    id: `daum-${url.match(/\/v\/(\d+)/)?.[1] || stableKey(title)}`,
+    title,
+    outlet,
+    reporter: "자동 수집",
+    url,
+    publishedAt: published,
+    sentiment,
+    topic: inferCategory(text),
+    mediaType,
+    channel: mediaType === "broadcast" ? "broadcast" : "online",
+    influenceScore: inferInfluence(outlet, mediaType),
+    releaseId: "",
+    matchScore: 0,
+    keywords: extractKeywords(text, 6),
+    risk,
+    status: risk === "high" ? "escalated" : "unreviewed",
+    excerpt: shorten(htmlToText(excerptBlock) || `${outlet}에서 보도한 조선대학교 관련 기사입니다.`, 360),
+    memo: "Daum 뉴스 검색에서 자동 수집되었습니다.",
+    attentionReason: attentionReasonForNews(text, mediaType, sentiment, risk),
+    sourceType: "daum-news",
+    portalOutlet: "Daum 뉴스",
+    portalUrl: url,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeDaumNewsUrl(value) {
+  const match = String(value || "").match(/https?:\/\/(?:v\.)?daum\.net\/v\/(\d+)/i);
+  return match ? `https://v.daum.net/v/${match[1]}` : "";
+}
+
+function daumNewsDateFromUrl(value) {
+  const timestamp = String(value || "").match(/\/v\/(20\d{12,})/)?.[1] || "";
+  if (timestamp.length < 12) return "";
+  return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)}T${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}`;
+}
+
+function dedupeNewsItems(items) {
+  const byUrl = uniqueBy(items, (item) => canonicalNewsUrl(item.url) || `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`);
+  return uniqueBy(byUrl, (item) => `${stableKey(item.outlet)}|${stableKey(item.title)}|${String(item.publishedAt).slice(0, 10)}`)
+    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
+}
+
+function canonicalNewsUrl(value) {
+  try {
+    const url = new URL(value);
+    url.protocol = "https:";
+    url.hash = "";
+    ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"].forEach((key) => url.searchParams.delete(key));
+    return url.href.replace(/\/$/, "").toLowerCase();
+  } catch (error) {
+    return normalizeWhitespace(value).replace(/#.*$/, "").replace(/\/$/, "").toLowerCase();
+  }
 }
 
 function bingFallbackQueries(search) {
@@ -312,12 +437,7 @@ function parseOfficialMarkdownList(source, startDate) {
     const publishAt = normalizeDate(match[3].match(/20\d{2}[.\/-]\d{1,2}[.\/-]\d{1,2}/)?.[0]);
     const sourceUrl = String(match[2]).replace(/^http:/i, "https:");
     if (!title || !publishAt || publishAt < startDate || !isLikelyOfficialReleaseTitle(title)) continue;
-    items.push({
-      title,
-      sourceUrl,
-      publishAt,
-      rowText: markdownPlainText(match[3]),
-    });
+    items.push({ title, sourceUrl, publishAt, rowText: markdownPlainText(match[3]) });
   }
   return uniqueBy(items, (item) => officialArticleNoFromUrl(item.sourceUrl) || item.sourceUrl).slice(0, MAX_OFFICIAL_ITEMS);
 }
@@ -1027,8 +1147,9 @@ async function fetchText(url) {
 async function fetchPage(url) {
   const target = new URL(url);
   const isGoogleNews = target.hostname === "news.google.com";
+  const isDaumSearch = target.hostname === "m.search.daum.net";
   const isJinaReader = target.hostname === "r.jina.ai";
-  const attempts = isGoogleNews ? 3 : isJinaReader ? 2 : 1;
+  const attempts = isGoogleNews ? 3 : isDaumSearch || isJinaReader ? 2 : 1;
   const timeoutMs = isJinaReader ? Math.max(FETCH_TIMEOUT_MS, 45000) : FETCH_TIMEOUT_MS;
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -1037,7 +1158,9 @@ async function fetchPage(url) {
     try {
       const response = await fetch(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "User-Agent": isDaumSearch
+            ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148"
+            : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           Accept: isGoogleNews
             ? "application/rss+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7"
             : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
